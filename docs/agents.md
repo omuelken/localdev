@@ -59,6 +59,7 @@ stderr carries `{"error": "...", "code": "..."}`.
 | `run [name]` | start an existing app (no redefinition) | URL |
 | `register [name] --port N` / `--cmd CMD` | upsert a definition, don't start | URL |
 | `unregister <name>` | stop and remove | nothing |
+| `rename <name> <new-name>` | rename (new URL); a managed app must be stopped | URL |
 | `list` | all apps | table |
 | `info [name]` | one app | key/value |
 | `url [name]` | | URL |
@@ -66,7 +67,7 @@ stderr carries `{"error": "...", "code": "..."}`.
 | `stop [name]` | stop the process group (SIGTERM, SIGKILL after 5s) | nothing |
 | `wait [name] [--timeout 60s]` | wait until the port accepts connections | URL |
 | `logs [name] [-n 100] [-f]` | combined stdout/stderr of the current run (file capped at 10 MB, older output in `<log_file>.1`) | log text |
-| `discover [--all]` | unregistered HTTP listeners on localhost (does not start the daemon) | table |
+| `discover [--all]` | unregistered HTTP listeners on localhost that run inside a project directory; `--all` lists every listener (does not start the daemon) | table |
 | `daemon start\|stop\|status\|run` | manage the daemon (`run` = foreground) | |
 | `agent-help` | print this document | |
 
@@ -129,17 +130,18 @@ Base URL: `http://localhost[:port]`. Get the port from `localdev daemon status -
 
 | Method & path | Body | Response |
 |---|---|---|
-| `GET /api/health` | | `{service:"localdev", version, pid, port, url, started_at, discover, config_file}` |
+| `GET /api/health` | | `{service:"localdev", version, pid, port, url, started_at, discover, auto_register, config_file}` |
 | `GET /api/docs` | | this document (markdown) |
 | `GET /api/apps` | | `[App]` |
 | `GET /api/apps/{name}` | | `App` or 404 |
 | `PUT /api/apps/{name}` | `{port?, command?, cwd? (absolute), env?, rewrite_host?, no_preview?}`, at least port or command | `App`, 201 if created. Never starts or restarts anything |
 | `DELETE /api/apps/{name}` | | `{ok, name}`, stops the process first |
+| `POST /api/apps/{name}/rename` | `{name}` | `App`. 409 `exists` if taken, 409 `running` if a managed app is running . Clears `auto_registered` |
 | `POST /api/apps/{name}/start` | optional `{env: ["K=V", ...]}` (the caller's environment for the process) | `App`. Idempotent; restarts only if stale |
 | `POST /api/apps/{name}/restart` | same | `App` |
 | `POST /api/apps/{name}/stop` | | `App` |
 | `GET /api/apps/{name}/logs?tail=200` | | text/plain |
-| `GET /api/discover` | | `[{port, addr, pid, process, command, cwd, http, registered_as}]` (fresh scan) |
+| `GET /api/discover` | | `[{port, addr, pid, process, command, cwd, project, http, registered_as}]` (fresh scan) |
 | `GET /api/discover?cached=1` | | latest scan from continuous discovery (`daemon run --discover`) |
 | `POST /api/shutdown` | | stops all managed apps and exits |
 

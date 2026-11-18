@@ -135,13 +135,13 @@ function appInfo(a) {
     else btns.push(`<button class="primary" data-act="start">Start</button>`);
     btns.push(`<button data-act="logs">Logs</button>`);
   }
-  btns.push(`<button class="danger" data-act="remove">Remove</button>`);
+  btns.push(`<button data-act="rename">Rename</button><button class="danger" data-act="remove">Remove</button>`);
   const stale = a.stale ? `<span class="badge stale" title="Definition changed since start; restart to apply">stale</span>` : "";
   const exit = a.status === "exited" ? ` (code ${esc(a.exit_code)})` : "";
   const info = `<div class="title"><span class="dot ${esc(a.status)}" title="${esc(a.status)}"></span>
       <a class="name" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name)}</a>
       <a class="url" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url)}</a>
-      <span class="badge">${esc(a.status)}${exit}</span><span class="badge">:${esc(a.port)}</span>${stale}</div>
+      <span class="badge">${esc(a.status)}${exit}</span><span class="badge">:${esc(a.port)}</span>${stale}${a.auto_registered ? `<span class="badge" title="Added by auto-register; removed when its port stays closed. Rename it to keep it.">auto</span>` : ""}</div>
     <div class="sub" title="${esc(sub)}">${esc(sub)}</div>
     ${a.cwd ? `<div class="sub" title="${esc(a.cwd)}">${esc(a.cwd)}</div>` : ""}`;
   return { info, actions: btns.join("") };
@@ -213,8 +213,8 @@ localdev register myapp --port 3000    # proxy to a server you run yourself</pre
 
 function renderFound(list) {
   const el = $("#found");
-  const items = list.filter((l) => l.http && !l.registered_as);
-  if (!items.length) { el.innerHTML = `<div class="empty">No unregistered HTTP services found.</div>`; return; }
+  const items = list.filter((l) => l.http && !l.registered_as && l.project);
+  if (!items.length) { el.innerHTML = `<div class="empty">No unregistered services from your projects found.</div>`; return; }
   el.innerHTML = items.map((l) => `<div class="row" data-port="${l.port}" data-suggest="${esc(suggest(l))}">
     <div><div class="title"><span class="dot running"></span><a class="name" href="http://localhost:${l.port}" target="_blank" rel="noopener">:${l.port}</a>
       <span class="badge">${esc(l.process || "unknown process")}</span>${l.pid ? `<span class="badge">pid ${l.pid}</span>` : ""}</div>
@@ -251,9 +251,15 @@ $("#apps").addEventListener("click", async (ev) => {
   const act = btn.dataset.act;
   if (act === "logs") return openLogs(name);
   if (act === "remove" && !confirm(`Unregister ${name}?`)) return;
+  let newName;
+  if (act === "rename") {
+    newName = prompt(`New name for ${name}:`, name);
+    if (!newName || newName === name) return;
+  }
   btn.disabled = true;
   try {
     if (act === "remove") await api("DELETE", `/api/apps/${name}`);
+    else if (act === "rename") await api("POST", `/api/apps/${name}/rename`, { name: newName });
     else await api("POST", `/api/apps/${name}/${act}`);
   } catch (e) { alert(e.message); }
   refresh();

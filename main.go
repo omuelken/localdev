@@ -47,6 +47,7 @@ Apps:
   register [name] --port N         register an app you run yourself (proxy only)
   register [name] --cmd CMD        register a managed app without starting it
   unregister <name>                remove an app (stops it if managed)       alias: rm
+  rename <name> <new-name>         rename an app (stop managed apps first)   alias: mv
   list                             list apps and their status                alias: ls
   info [name]                      show one app
   url [name]                       print the app's URL
@@ -57,7 +58,7 @@ Apps:
   logs [name] [-n 100] [-f]        print (or follow) a managed app's output
 
 Discovery:
-  discover [--all]                 list unregistered services listening on localhost
+  discover [--all]                 list unregistered project services listening on localhost
 
 Daemon:
   daemon [run|start|stop|status]   run in foreground / background, stop, show status
@@ -105,6 +106,8 @@ func run(args []string) int {
 		return cmdRegister(rest)
 	case "unregister", "rm", "remove":
 		return cmdUnregister(rest)
+	case "rename", "mv":
+		return cmdRename(rest)
 	case "list", "ls":
 		return cmdList(rest)
 	case "info", "show":
@@ -474,6 +477,31 @@ func cmdUnregister(args []string) int {
 	return exitOK
 }
 
+func cmdRename(args []string) int {
+	fs := flag.NewFlagSet("rename", flag.ContinueOnError)
+	pos, _, err := parseArgs(fs, args)
+	if err != nil {
+		return fail(err)
+	}
+	if len(pos) != 2 {
+		return fail(usageError{"usage: localdev rename <name> <new-name>"})
+	}
+	c, name, err := connectAndResolve(pos[:1], "")
+	if err != nil {
+		return fail(err)
+	}
+	var v AppView
+	if err := c.do("POST", "/api/apps/"+name+"/rename", renameRequest{Name: pos[1]}, &v); err != nil {
+		return fail(err)
+	}
+	if jsonOut {
+		printJSON(v)
+	} else {
+		fmt.Println(v.URL)
+	}
+	return exitOK
+}
+
 func cmdList(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	if _, _, err := parseArgs(fs, args); err != nil {
@@ -723,7 +751,7 @@ func followFile(path string, n int) int {
 
 func cmdDiscover(args []string) int {
 	fs := flag.NewFlagSet("discover", flag.ContinueOnError)
-	all := fs.Bool("all", false, "include non-HTTP and already registered services")
+	all := fs.Bool("all", false, "include non-HTTP, non-project and already registered services")
 	if _, _, err := parseArgs(fs, args); err != nil {
 		return fail(err)
 	}
@@ -749,7 +777,7 @@ func cmdDiscover(args []string) int {
 	}
 	out := []Listener{}
 	for _, l := range ls {
-		if *all || (l.HTTP && l.RegisteredAs == "") {
+		if *all || (l.HTTP && l.RegisteredAs == "" && l.Project != "") {
 			out = append(out, l)
 		}
 	}
@@ -758,7 +786,7 @@ func cmdDiscover(args []string) int {
 		return exitOK
 	}
 	if len(out) == 0 {
-		logf("no unregistered HTTP services found (use --all to see everything)")
+		logf("no unregistered HTTP services in projects found (use --all to see everything)")
 		return exitOK
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -844,7 +872,7 @@ func cmdDaemon(args []string) int {
 				daemonInfo
 			}{true, info})
 		} else {
-			fmt.Printf("running: %s (pid %d, version %s)\nregistry: %s\ndiscovery: %v\n", info.URL, info.PID, info.Version, info.Config, info.Discover)
+			fmt.Printf("running: %s (pid %d, version %s)\nregistry: %s\ndiscovery: %v\nauto-register: %v\n", info.URL, info.PID, info.Version, info.Config, info.Discover, info.AutoReg)
 		}
 		return exitOK
 	default:

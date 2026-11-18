@@ -48,5 +48,50 @@ func listListeners() ([]Listener, error) {
 			ls = append(ls, Listener{Port: port, Addr: ip.String(), PID: pid, PGID: pgid, Process: comm})
 		}
 	}
-	return dedupeListeners(ls), nil
+	ls = dedupeListeners(ls)
+	addProcInfo(ls)
+	return ls, nil
+}
+
+// addProcInfo fills in each listener's working directory (via lsof) and command line (via ps).
+// Failures are ignored: the fields are only hints for naming.
+func addProcInfo(ls []Listener) {
+	if len(ls) == 0 {
+		return
+	}
+	seen := map[int]bool{}
+	var pids []string
+	for _, l := range ls {
+		if l.PID > 0 && !seen[l.PID] {
+			seen[l.PID] = true
+			pids = append(pids, strconv.Itoa(l.PID))
+		}
+	}
+	list := strings.Join(pids, ",")
+	cwd, cmd := map[int]string{}, map[int]string{}
+	out, _ := exec.Command("lsof", "-a", "-p", list, "-d", "cwd", "-Fn").Output()
+	pid := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 2 {
+			continue
+		}
+		switch line[0] {
+		case 'p':
+			pid, _ = strconv.Atoi(line[1:])
+		case 'n':
+			cwd[pid] = line[1:]
+		}
+	}
+	out, _ = exec.Command("ps", "-ww", "-o", "pid=,command=", "-p", list).Output()
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.SplitN(strings.TrimSpace(line), " ", 2)
+		if len(f) == 2 {
+			if p, err := strconv.Atoi(f[0]); err == nil {
+				cmd[p] = strings.TrimSpace(f[1])
+			}
+		}
+	}
+	for i := range ls {
+		ls[i].Cwd, ls[i].Command = cwd[ls[i].PID], cmd[ls[i].PID]
+	}
 }

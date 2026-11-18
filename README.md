@@ -74,6 +74,7 @@ localdev logs myapp -f
 localdev open myapp
 localdev stop myapp
 localdev unregister api
+localdev rename api backend      # new URL; a managed app must be stopped first
 ```
 
 - Omit the name and localdev uses the app registered for the current directory, or else the
@@ -99,13 +100,31 @@ localdev unregister api
 ### Discovery (optional)
 
 ```sh
-localdev discover          # one-shot: unregistered HTTP servers listening on localhost
-localdev discover --all    # include non-HTTP and registered listeners
+localdev discover          # one-shot: unregistered HTTP servers from your projects
+localdev discover --all    # every listener, incl. non-HTTP, system and registered ones
 ```
 
 For continuous discovery, run the daemon with `localdev daemon run --discover`, or set
 `LOCALDEV_DISCOVER=1` before the daemon auto-starts. The dashboard then lists unregistered
-servers, and you can register them with one click. It is off by default.
+servers, and you can register them with one click. It is off by default. Only services
+that run inside a project are listed: their working directory, or a parent below your home
+directory, contains a marker such as `.git`, `package.json`, `pyproject.toml`, `go.mod` or
+`Cargo.toml`, or that run a known dev-server tool (marimo, Jupyter, Streamlit, uvicorn,
+Vite, Next.js, ...) from any directory. System and desktop-app services (AirPlay, AirServer, ...) are therefore skipped;
+`discover --all` still shows them. Claude Code sessions, which each listen on a local port, and other
+localdev daemons are never listed.
+
+To register every discovered HTTP server automatically, use `localdev daemon run --auto-register`
+or set `LOCALDEV_AUTO_REGISTER=1` (implies discovery). Each one is named after its working
+directory, else its process name (`-<port>` is appended on a clash), and becomes a proxy-only
+app. It considers the same project services the dashboard lists; skip more by process name
+with `--auto-register-ignore foo,bar` or `LOCALDEV_AUTO_REGISTER_IGNORE`. If you `unregister` one, it is not added back while the same process holds the port. Rename
+apps with the dashboard's Rename button or `localdev rename <name> <new-name>`.
+
+Auto-registered apps (marked `auto` in the dashboard) are removed again once nothing has
+listened on their port for 2 minutes, and re-added if the server comes back. Change the delay
+with `--auto-remove-after 10m` or `LOCALDEV_AUTO_REMOVE_AFTER`; `0` keeps them. Renaming or
+re-registering an app by hand keeps it for good.
 
 ### Running the daemon
 

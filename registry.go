@@ -22,8 +22,11 @@ type AppConfig struct {
 	Env         map[string]string `json:"env,omitempty"`
 	RewriteHost bool              `json:"rewrite_host,omitempty"`
 	NoPreview   bool              `json:"no_preview,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	// AutoRegistered marks apps added by --auto-register; they are removed again once their
+	// port stays closed (see Daemon.pruneLocked). Renaming or re-registering clears it.
+	AutoRegistered bool      `json:"auto_registered,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type registryFile struct {

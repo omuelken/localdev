@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,7 +38,12 @@ type Daemon struct {
 	apps       map[string]*App
 	startedAt  time.Time
 	discoverOn bool
+	autoReg    bool
+	autoIgnore []string // process names never auto-registered
 	discovered []Listener
+	dismissed  map[int]int          // port -> pid of listener whose app was unregistered (0: any)
+	autoRemove time.Duration        // remove auto-registered apps whose port stays closed this long (0: never)
+	lastSeen   map[string]time.Time // auto-registered app -> last time its port was listening
 	shutdown   chan struct{}
 	mux        *http.ServeMux
 	proxy      http.Handler
@@ -51,6 +57,7 @@ type daemonInfo struct {
 	URL       string    `json:"url"`
 	StartedAt time.Time `json:"started_at"`
 	Discover  bool      `json:"discover"`
+	AutoReg   bool      `json:"auto_register"`
 	Config    string    `json:"config_file"`
 }
 
@@ -67,6 +74,7 @@ type AppView struct {
 	Env         map[string]string `json:"env,omitempty"`
 	RewriteHost bool              `json:"rewrite_host"`
 	NoPreview   bool              `json:"no_preview"`
+	AutoReg     bool              `json:"auto_registered,omitempty"`
 	PID         int               `json:"pid,omitempty"`
 	ExitCode    *int              `json:"exit_code,omitempty"`
 	StartedAt   *time.Time        `json:"started_at,omitempty"`
@@ -89,7 +97,8 @@ func (d *Daemon) info() daemonInfo {
 	return daemonInfo{
 		Service: "localdev", Version: version, PID: os.Getpid(), Port: d.port,
 		URL: d.baseURL("localhost"), StartedAt: d.startedAt, Discover: d.discoverOn,
-		Config: d.paths.appsFile(),
+		AutoReg: d.autoReg,
+		Config:  d.paths.appsFile(),
 	}
 }
 
@@ -116,7 +125,7 @@ func (d *Daemon) viewLocked(a *App) AppView {
 	v := AppView{
 		Name: c.Name, URL: d.appURL(c.Name), Managed: c.Command != "", Port: c.Port,
 		PortAuto: c.PortAuto, Command: c.Command, Cwd: c.Cwd, Env: c.Env, RewriteHost: c.RewriteHost,
-		NoPreview: c.NoPreview,
+		NoPreview: c.NoPreview, AutoReg: c.AutoRegistered,
 		CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
 	}
 	if v.Managed {
@@ -269,6 +278,7 @@ func (d *Daemon) routes() {
 	m.HandleFunc("POST /api/apps/{name}/start", d.guard(d.handleStart(false)))
 	m.HandleFunc("POST /api/apps/{name}/restart", d.guard(d.handleStart(true)))
 	m.HandleFunc("POST /api/apps/{name}/stop", d.guard(d.handleStop))
+	m.HandleFunc("POST /api/apps/{name}/rename", d.guard(d.handleRename))
 	m.HandleFunc("GET /api/apps/{name}/logs", d.handleLogs)
 	m.HandleFunc("GET /api/discover", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("cached") != "" && d.discoverOn {
@@ -380,6 +390,7 @@ func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
 		}
 		c.Port = p
 	}
+	c.AutoRegistered = false // registered by hand now: keep it
 	c.UpdatedAt = now
 	d.saveLocked()
 	v := d.viewLocked(a)
@@ -399,12 +410,70 @@ func (d *Daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(d.apps, name)
 	d.saveLocked()
+	if a.cfg.Command == "" {
+		d.dismissLocked(a.cfg.Port)
+	}
 	p := a.proc
 	d.mu.Unlock()
 	if p != nil {
 		d.stop(p)
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "name": name})
+}
+
+type renameRequest struct {
+	Name string `json:"name"`
+}
+
+// handleRename gives an app a new name (and thus URL). A managed app must not be running,
+// since its process was started with the old name; its log files move along.
+func (d *Daemon) handleRename(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var req renameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "bad_request", "invalid JSON body: "+err.Error())
+		return
+	}
+	if !validName(req.Name) {
+		writeErr(w, 400, "bad_request", "invalid app name "+strconv.Quote(req.Name)+": use lowercase letters, digits and dashes")
+		return
+	}
+	d.mu.Lock()
+	a := d.apps[name]
+	switch {
+	case a == nil:
+		d.mu.Unlock()
+		writeErr(w, 404, "not_found", "no app named "+name)
+		return
+	case req.Name == name:
+		v := d.viewLocked(a)
+		d.mu.Unlock()
+		probe(&v)
+		writeJSON(w, 200, v)
+		return
+	case d.apps[req.Name] != nil:
+		d.mu.Unlock()
+		writeErr(w, 409, "exists", "an app named "+req.Name+" already exists")
+		return
+	case a.proc != nil && !a.proc.exited():
+		d.mu.Unlock()
+		writeErr(w, 409, "running", "stop "+name+" before renaming it")
+		return
+	}
+	for _, suffix := range []string{"", ".1"} {
+		os.Rename(d.paths.logFile(name)+suffix, d.paths.logFile(req.Name)+suffix)
+	}
+	delete(d.apps, name)
+	a.cfg.Name = req.Name
+	a.cfg.AutoRegistered = false // the user cares about it now: keep it
+	delete(d.lastSeen, name)
+	a.cfg.UpdatedAt = time.Now().UTC()
+	d.apps[req.Name] = a
+	d.saveLocked()
+	v := d.viewLocked(a)
+	d.mu.Unlock()
+	probe(&v)
+	writeJSON(w, 200, v)
 }
 
 type startRequest struct {
@@ -543,6 +612,9 @@ func cmdDaemonRun(args []string) int {
 	port := fs.Int("port", envInt("LOCALDEV_PORT", 0), "port to listen on (default 80, falling back to 7777 if 80 is unavailable)")
 	disc := fs.Bool("discover", os.Getenv("LOCALDEV_DISCOVER") == "1", "continuously scan for unregistered localhost services")
 	interval := fs.Duration("discover-interval", 5*time.Second, "scan interval for --discover")
+	autoIgnore := fs.String("auto-register-ignore", os.Getenv("LOCALDEV_AUTO_REGISTER_IGNORE"), "comma-separated process names to never auto-register")
+	autoRemove := fs.Duration("auto-remove-after", envDuration("LOCALDEV_AUTO_REMOVE_AFTER", 2*time.Minute), "remove auto-registered apps whose port stays closed this long (0: never)")
+	autoReg := fs.Bool("auto-register", os.Getenv("LOCALDEV_AUTO_REGISTER") == "1", "register every discovered HTTP service automatically (implies --discover)")
 	if _, _, err := parseArgs(fs, args); err != nil {
 		return fail(err)
 	}
@@ -566,7 +638,7 @@ func cmdDaemonRun(args []string) int {
 		log.Print(err)
 		return exitError
 	}
-	d := &Daemon{paths: p, apps: map[string]*App{}, startedAt: time.Now().UTC(), discoverOn: *disc, shutdown: make(chan struct{}, 1)}
+	d := &Daemon{paths: p, apps: map[string]*App{}, startedAt: time.Now().UTC(), discoverOn: *disc || *autoReg, autoReg: *autoReg, autoIgnore: splitList(*autoIgnore), dismissed: map[int]int{}, autoRemove: *autoRemove, lastSeen: map[string]time.Time{}, shutdown: make(chan struct{}, 1)}
 	for n, c := range cfgs {
 		d.apps[n] = &App{cfg: c}
 	}
@@ -638,6 +710,10 @@ func (d *Daemon) discoverLoop(interval time.Duration) {
 		ls, err := d.scan()
 		if err == nil {
 			d.mu.Lock()
+			if d.autoReg {
+				d.pruneLocked(ls, time.Now())
+				d.autoRegisterLocked(ls)
+			}
 			d.discovered = ls
 			d.mu.Unlock()
 		} else if errors.Is(err, errors.ErrUnsupported) {
@@ -647,9 +723,159 @@ func (d *Daemon) discoverLoop(interval time.Duration) {
 	}
 }
 
+func envDuration(key string, def time.Duration) time.Duration {
+	if v, err := time.ParseDuration(os.Getenv(key)); err == nil {
+		return v
+	}
+	return def
+}
+
+// pruneLocked removes auto-registered apps whose port has had no listener for longer than
+// d.autoRemove. The clock for an app starts when the daemon first sees its port closed.
+// It returns the names it removed.
+func (d *Daemon) pruneLocked(ls []Listener, now time.Time) []string {
+	if d.autoRemove <= 0 {
+		return nil
+	}
+	open := map[int]bool{}
+	for _, l := range ls {
+		open[l.Port] = true
+	}
+	var removed []string
+	for name, a := range d.apps {
+		if !a.cfg.AutoRegistered {
+			continue
+		}
+		seen, ok := d.lastSeen[name]
+		switch {
+		case open[a.cfg.Port] || !ok:
+			d.lastSeen[name] = now
+		case now.Sub(seen) > d.autoRemove:
+			delete(d.apps, name)
+			delete(d.lastSeen, name)
+			removed = append(removed, name)
+			log.Printf("localdev: removed auto-registered %s (port %d closed for %s)", name, a.cfg.Port, d.autoRemove)
+		}
+	}
+	for name := range d.lastSeen {
+		if d.apps[name] == nil {
+			delete(d.lastSeen, name)
+		}
+	}
+	if len(removed) > 0 {
+		sort.Strings(removed)
+		d.saveLocked()
+	}
+	return removed
+}
+
 func envInt(key string, def int) int {
 	if v, err := strconv.Atoi(os.Getenv(key)); err == nil {
 		return v
 	}
 	return def
+}
+
+// suggestName guesses an app name for a listener: its working directory's name, else the
+// process name. It mirrors suggest() in dashboard.html.
+func suggestName(l Listener) string {
+	if l.Cwd != "" && l.Cwd != "/" {
+		if n := sanitizeName(filepath.Base(l.Cwd)); n != "" {
+			return n
+		}
+	}
+	if n := sanitizeName(l.Process); n != "" {
+		return n
+	}
+	return "app"
+}
+
+// uniqueNameLocked returns base if it is free, else base-<port>, else base-<port>-2, ...
+func (d *Daemon) uniqueNameLocked(base string, port int) string {
+	fit := func(s, suffix string) string {
+		if len(s)+len(suffix) > 63 {
+			s = strings.TrimRight(s[:63-len(suffix)], "-")
+		}
+		return s + suffix
+	}
+	if d.apps[base] == nil {
+		return base
+	}
+	name := fit(base, "-"+strconv.Itoa(port))
+	for i := 2; d.apps[name] != nil; i++ {
+		name = fit(base, fmt.Sprintf("-%d-%d", port, i))
+	}
+	return name
+}
+
+// dismissLocked remembers that the user unregistered the app on port, so auto-registration
+// does not add it back while the same process keeps listening there.
+func (d *Daemon) dismissLocked(port int) {
+	pid := 0
+	for _, l := range d.discovered {
+		if l.Port == port {
+			pid = l.PID
+			break
+		}
+	}
+	d.dismissed[port] = pid
+}
+
+// autoRegisterLocked registers every unregistered HTTP listener as a proxy-only app and
+// marks it in ls. It returns the names it added.
+func (d *Daemon) autoRegisterLocked(ls []Listener) []string {
+	taken := map[int]bool{}
+	for _, a := range d.apps {
+		taken[a.cfg.Port] = true
+	}
+	var added []string
+	for i := range ls {
+		l := &ls[i]
+		if !l.HTTP || l.RegisteredAs != "" || taken[l.Port] || l.Port == d.port || !d.autoEligible(*l) {
+			continue
+		}
+		if pid, ok := d.dismissed[l.Port]; ok && (pid == 0 || pid == l.PID) {
+			continue
+		}
+		delete(d.dismissed, l.Port) // a different process took over the port
+		name := d.uniqueNameLocked(suggestName(*l), l.Port)
+		now := time.Now().UTC()
+		d.apps[name] = &App{cfg: &AppConfig{Name: name, Port: l.Port, AutoRegistered: true, CreatedAt: now, UpdatedAt: now}}
+		taken[l.Port] = true
+		l.RegisteredAs = name
+		added = append(added, name)
+		log.Printf("localdev: auto-registered %s -> port %d (%s)", name, l.Port, l.Process)
+	}
+	if len(added) > 0 {
+		d.saveLocked()
+	}
+	return added
+}
+
+// autoEligible reports whether a listener belongs to a project (see projectRoot) and does
+// not match an ignored process name.
+func (d *Daemon) autoEligible(l Listener) bool {
+	if l.Project == "" {
+		return false
+	}
+	names := []string{strings.ToLower(l.Process)}
+	if f := strings.Fields(l.Command); len(f) > 0 {
+		names = append(names, strings.ToLower(filepath.Base(f[0])))
+	}
+	for _, ig := range d.autoIgnore {
+		if slices.Contains(names, ig) {
+			return false
+		}
+	}
+	return true
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.ToLower(strings.TrimSpace(f)); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
