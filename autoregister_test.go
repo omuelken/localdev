@@ -210,3 +210,15 @@ func TestPruneAutoRegistered(t *testing.T) {
 		t.Errorf("pruned with auto-remove off: %v", got)
 	}
 }
+
+func TestAddDevTools(t *testing.T) {
+	cmd := "python3 /Users/x/.local/bin/shakels"
+	if devTool(cmd) {
+		t.Fatalf("devTool(%q) = true before adding", cmd)
+	}
+	addDevTools(" Shakels , ,other")
+	t.Cleanup(func() { delete(devTools, "shakels"); delete(devTools, "other") })
+	if !devTool(cmd) {
+		t.Errorf("devTool(%q) = false after addDevTools", cmd)
+	}
+}

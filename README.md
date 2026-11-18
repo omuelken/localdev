@@ -110,7 +110,9 @@ servers, and you can register them with one click. It is off by default. Only se
 that run inside a project are listed: their working directory, or a parent below your home
 directory, contains a marker such as `.git`, `package.json`, `pyproject.toml`, `go.mod` or
 `Cargo.toml`, or that run a known dev-server tool (marimo, Jupyter, Streamlit, uvicorn,
-Vite, Next.js, ...) from any directory. System and desktop-app services (AirPlay, AirServer, ...) are therefore skipped;
+Vite, Next.js, ...) from any directory. Add your own tools by command name with
+`--dev-tool foo,bar` (on `discover` and `daemon run`) or `LOCALDEV_DEV_TOOLS=foo,bar`; a
+script run as `python3 ~/.local/bin/foo` matches `foo`. System and desktop-app services (AirPlay, AirServer, ...) are therefore skipped;
 `discover --all` still shows them. Claude Code sessions, which each listen on a local port, and other
 localdev daemons are never listed.
 

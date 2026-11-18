@@ -615,9 +615,11 @@ func cmdDaemonRun(args []string) int {
 	autoIgnore := fs.String("auto-register-ignore", os.Getenv("LOCALDEV_AUTO_REGISTER_IGNORE"), "comma-separated process names to never auto-register")
 	autoRemove := fs.Duration("auto-remove-after", envDuration("LOCALDEV_AUTO_REMOVE_AFTER", 2*time.Minute), "remove auto-registered apps whose port stays closed this long (0: never)")
 	autoReg := fs.Bool("auto-register", os.Getenv("LOCALDEV_AUTO_REGISTER") == "1", "register every discovered HTTP service automatically (implies --discover)")
+	extraTools := fs.String("dev-tool", os.Getenv("LOCALDEV_DEV_TOOLS"), "comma-separated command names to treat as dev-server tools (discovered from any directory)")
 	if _, _, err := parseArgs(fs, args); err != nil {
 		return fail(err)
 	}
+	addDevTools(*extraTools)
 	p := getPaths()
 	if err := os.MkdirAll(p.state, 0o755); err != nil {
 		log.Print(err)

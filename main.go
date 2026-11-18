@@ -58,7 +58,7 @@ Apps:
   logs [name] [-n 100] [-f]        print (or follow) a managed app's output
 
 Discovery:
-  discover [--all]                 list unregistered project services listening on localhost
+  discover [--all] [--dev-tool X]  list unregistered project services listening on localhost
 
 Daemon:
   daemon [run|start|stop|status]   run in foreground / background, stop, show status
@@ -752,9 +752,11 @@ func followFile(path string, n int) int {
 func cmdDiscover(args []string) int {
 	fs := flag.NewFlagSet("discover", flag.ContinueOnError)
 	all := fs.Bool("all", false, "include non-HTTP, non-project and already registered services")
+	extraTools := fs.String("dev-tool", os.Getenv("LOCALDEV_DEV_TOOLS"), "comma-separated command names to treat as dev-server tools (discovered from any directory)")
 	if _, _, err := parseArgs(fs, args); err != nil {
 		return fail(err)
 	}
+	addDevTools(*extraTools)
 	// Runs locally and never starts the daemon.
 	skip := map[int]bool{}
 	registered := map[int]string{}

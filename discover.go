@@ -98,6 +98,14 @@ var devTools = map[string]bool{
 	"air": true, "wrangler": true, "netlify": true, "vercel": true,
 }
 
+// addDevTools adds comma-separated command names (from --dev-tool or LOCALDEV_DEV_TOOLS) that
+// count as dev-server tools, so their services are discovered from any directory.
+func addDevTools(list string) {
+	for _, n := range splitList(list) {
+		devTools[n] = true
+	}
+}
+
 // devTool reports whether a command line runs a known dev-server tool, directly
 // ("marimo run x.py"), through an interpreter or runner ("python .../bin/marimo",
 // "uv run streamlit", "npx vite"), or as a module ("python -m uvicorn").

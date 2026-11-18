@@ -67,7 +67,7 @@ stderr carries `{"error": "...", "code": "..."}`.
 | `stop [name]` | stop the process group (SIGTERM, SIGKILL after 5s) | nothing |
 | `wait [name] [--timeout 60s]` | wait until the port accepts connections | URL |
 | `logs [name] [-n 100] [-f]` | combined stdout/stderr of the current run (file capped at 10 MB, older output in `<log_file>.1`) | log text |
-| `discover [--all]` | unregistered HTTP listeners on localhost that run inside a project directory; `--all` lists every listener (does not start the daemon) | table |
+| `discover [--all] [--dev-tool X,Y]` | unregistered HTTP listeners on localhost that run inside a project directory or run a dev-server tool (extra tools via `--dev-tool` or `LOCALDEV_DEV_TOOLS`); `--all` lists every listener (does not start the daemon) | table |
 | `daemon start\|stop\|status\|run` | manage the daemon (`run` = foreground) | |
 | `agent-help` | print this document | |
 
